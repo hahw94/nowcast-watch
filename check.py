@@ -47,6 +47,8 @@ def limit(now):
 
 def main():
     now = dt.datetime.now(KST)
+    if os.environ.get("TEST") == "1":                         # Actions 에서 손으로 돌릴 때 '시험 알림 보내기'를 고르면 폰으로 한 번 보냄(토큰 · 번호 확인용)
+        send(f"🔔 시험 알림 · {now:%m-%d %H:%M} KST\n사이트 갱신 감시가 연결됐습니다: {SITE}"); return
     st = json.load(open(STATE, encoding="utf-8")) if os.path.exists(STATE) else {"alert": False}
     try:
         j = json.loads(urllib.request.urlopen(f"{SITE}data/index.json?t={int(now.timestamp())}", timeout=30).read())
