@@ -3,6 +3,9 @@ name: site-watch
 on:
   schedule:
     - cron: "*/10 * * * *"
+  push:                                         # 감시 코드 · 설정을 바꿔 올리면 시험 알림 한 번(바뀐 문구 확인용, 2026-10-31)
+    branches: [main]
+    paths: [check.py, .github/workflows/watch.yml]
   workflow_dispatch:
     inputs:
       test:
@@ -27,7 +30,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEST: ${{ inputs.test && '1' || '0' }}
+          TEST: ${{ (inputs.test || github.event_name == 'push') && '1' || '0' }}
         run: python check.py
       - name: save state
         run: |
