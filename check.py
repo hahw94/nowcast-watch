@@ -21,7 +21,7 @@ import urllib.request
 SITE = "https://hahw94.github.io/solar-nowcast-live/"
 DAY = ((7, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
-SERVER_SILENT_MIN = 40                          # status.json 이 이보다 오래됐으면 서버 응답 없음으로 봄(실패가 있으면 30분마다 다시 올림)
+SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 # ==============================================================
@@ -71,17 +71,19 @@ def cause(now):
     try:
         s = rd("data/status.json", now)
     except Exception as e:
-        return [f"· 서버 상태 파일을 못 읽음({type(e).__name__})"]
-    up = dt.datetime.strptime(s["updated"], "%Y-%m-%d %H:%M").replace(tzinfo=KST); silent = (now - up).total_seconds() / 60 > SERVER_SILENT_MIN
-    L = [f"· 서버 {'응답 없음 추정' if silent else '살아 있음'} (서버 마지막 기록 {up:%m-%d %H:%M})"]
+        return [f"· 서버 상태 파일을 못 읽음({type(e).__name__})"], True
+    up = dt.datetime.strptime(s["updated"], "%Y-%m-%d %H:%M").replace(tzinfo=KST); lim = limit(now)
+    silent = lim is not None and (now - up).total_seconds() / 60 > max(SERVER_SILENT_MIN, lim)   # 발표 없는 시간(05:40 – 07:40 등)엔 오래돼도 정상(2026-10-31)
+    L = [f"· 서버 {'응답 없음 추정' if silent else '정상 작동 중'} (서버 마지막 기록 {up:%m-%d %H:%M})"]
     for e in (s.get("errors") or [])[-2:]:
         L.append(f"· 최근 실패: {e[:150]}")
     last = s.get("last") or {}
-    for k, nm in (("b5", "B5"), ("l1", "밤 단기"), ("pub", "올리기")):
+    for k, nm in (("b5", "B5 업데이트"), ("l1", "단기 업데이트")):                              # 문구: 2026-10-31 연구자
         if last.get(k):
-            L.append(f"· 마지막 {nm} 성공: {last[k][1:15]}")
-    L.append(f"· 디스크 남음 {s.get('disk_free_gb')} GB · 오늘 기상청 받기 {s.get('kma_today_gb')} GB")
-    return L
+            L.append(f"· 마지막 {nm}: {last[k][1:15]}")
+    L.append(f"· 마지막 업데이트: {up:%m-%d %H:%M}")                                            # 사이트에 올린 시각(낮 · 밤 모두)
+    L.append(f"· 남은 디스크 용량 {s.get('disk_free_gb')} GB · 오늘 기상청 API 사용량 {s.get('kma_today_gb')} GB")
+    return L, (silent or bool(s.get("errors")))
 
 
 def heartbeat(now, why):
@@ -101,7 +103,7 @@ def heartbeat(now, why):
         lines.append(f"⚠ 초단기 확인 못 함({type(e).__name__})")
     try:
         s = rd("data/status.json", now); r = s.get("res24") or {}; j = r.get("job_sec") or {}
-        lines.append(f"· 디스크 {s.get('disk_used_gb', '?')} / {s.get('disk_total_gb', '?')} GB 사용 · 오늘 기상청 받기 {s.get('kma_today_gb')} GB")   # 대략적인 서버 상태(2026-10-31 연구자)
+        lines.append(f"· 디스크 {s.get('disk_used_gb', '?')} / {s.get('disk_total_gb', '?')} GB 사용 · 오늘 기상청 API 사용량 {s.get('kma_today_gb')} GB")   # 대략적인 서버 상태(2026-10-31 연구자)
         if r.get("cpu_avg") is not None:
             lines.append(f"· CPU(24시간) 평균 {r['cpu_avg']} % · 95 % 지점 {r.get('cpu_p95')} % · 바쁨(90 % 넘음) {r.get('cpu_busy_min')}분")
         if r.get("mem_max_gb") is not None:
@@ -112,13 +114,13 @@ def heartbeat(now, why):
     except Exception:
         pass
     bad = any(x.startswith("⚠") for x in lines)
-    return f"{'⚠ 확인 필요' if bad else '☀ 정상'} · {now:%m-%d %H:%M}\n" + "\n".join(lines) + f"\n· {why}"
+    return f"☀ 아침 점검 · {now:%m-%d %H:%M} KST\n모니터링 결과 : {'확인 필요' if bad else '문제 없음'}\n" + "\n".join(lines) + f"\n· {why}"
 
 
 def main():
     now = dt.datetime.now(KST)
     if os.environ.get("TEST") == "1":                         # Actions 에서 손으로 돌릴 때 '시험 알림 보내기'를 고르면 폰으로 한 번 보냄(토큰 · 번호 확인용)
-        send(f"🔔 시험 알림 · {now:%m-%d %H:%M} KST\n사이트 감시가 연결됐습니다: {SITE}\n" + "\n".join(cause(now))); return
+        L, bad = cause(now); send(f"🔔 시험 알림 · {now:%m-%d %H:%M} KST\n모니터링 결과 : {'확인 필요' if bad else '문제 없음'}\n" + "\n".join(L)); return
     st = json.load(open(STATE, encoding="utf-8")) if os.path.exists(STATE) else {"alert": False}
     try:
         t, kind, _ = latest(now); age = (now - t).total_seconds() / 60 if t else 1e9; why = f"마지막 결과 {kind} {t:%m-%d %H:%M} 발표 ({age:.0f}분 전)" if t else "결과 없음"
@@ -127,9 +129,9 @@ def main():
     lim = limit(now); stale = lim is not None and age > lim
     print(f"{now:%m-%d %H:%M} KST · {why} · 기준 {lim}분 · 멈춤 {stale}")
     if stale and not st.get("alert"):
-        send(f"⚠ 태양광 예측이 멈춤\n{why}\n" + "\n".join(cause(now)) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k == "hb"}}
+        send(f"⚠ 태양광 예측이 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {why}\n" + "\n".join(cause(now)[0]) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k == "hb"}}
     elif st.get("alert") and age <= (lim or 110):
-        send(f"✅ 예측 복구\n{why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k == "hb"}}
+        send(f"✅ 예측 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k == "hb"}}
     if now.hour * 60 + now.minute >= HB[0] * 60 + HB[1] and st.get("hb") != now.strftime("%Y-%m-%d"):   # 하루 한 번 '정상' 요약(감시가 살아 있다는 확인도 겸함)
         try:
             send(heartbeat(now, why)); st["hb"] = now.strftime("%Y-%m-%d")
