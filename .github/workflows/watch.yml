@@ -2,7 +2,7 @@
 name: site-watch
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "3,13,23,33,43,53 * * * *"         # 정각(:00)은 GitHub 이 붐벼 건너뛰는 일이 많아 3분 비켜 둠(2026-10-31)
   push:                                         # 감시 코드 · 설정을 바꿔 올리면 시험 알림 한 번(바뀐 문구 확인용, 2026-10-31)
     branches: [main]
     paths: [check.py, .github/workflows/watch.yml]
