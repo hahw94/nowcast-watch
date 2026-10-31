@@ -22,6 +22,7 @@ SITE = "https://hahw94.github.io/solar-nowcast-live/"
 DAY = ((7, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
 SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
+WIND_LIM = 60                                   # 풍력 바람 자료(data/wind.json, 서버 20분마다)가 이 분보다 오래되면 멈춤 알림(2026-10-31 연구자)
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 # ==============================================================
@@ -83,7 +84,18 @@ def cause(now):
             L.append(f"· 마지막 {nm}: {last[k][1:15]}")
     L.append(f"· 마지막 업데이트: {up:%m-%d %H:%M}")                                            # 사이트에 올린 시각(낮 · 밤 모두)
     L.append(f"· 남은 디스크 용량 {s.get('disk_free_gb')} GB · 오늘 기상청 API 사용량 {s.get('kma_today_gb')} GB")
-    return L, (silent or bool(s.get("errors")))
+    wt, wa = wind_age(now)
+    L.append(f"· 풍력 바람 {'멈춤 추정' if wa > WIND_LIM else '정상'} (마지막 수집 {wt:%m-%d %H:%M})" if wt else "· 풍력 바람 자료를 못 읽음")
+    return L, (silent or bool(s.get("errors")) or wa > WIND_LIM)
+
+
+def wind_age(now):
+    """풍력 바람 자료의 마지막 수집 시각과 지난 분(못 읽으면 None, 큰 값)"""
+    try:
+        m = rd("data/wind.json", now).get("made"); t = dt.datetime.strptime(m[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=KST)
+        return t, (now - t).total_seconds() / 60
+    except Exception:
+        return None, 1e9
 
 
 def heartbeat(now, why):
@@ -111,6 +123,10 @@ def heartbeat(now, why):
         if any(v for v in j.values()):
             lines.append("· 계산 시간(중앙): " + " · ".join(f"{nm} {j[k]}초" for k, nm in (("b5", "B5"), ("w", "W"), ("l1", "밤 단기")) if j.get(k)))
         lines.append(f"{'⚠' if s.get('errors') else '·'} 최근 실패 {len(s.get('errors') or [])}건")
+        w = s.get("wind") or {}; wt, wa = wind_age(now)
+        lines.append(f"{'⚠' if wa > WIND_LIM or w.get('stale') else '·'} 풍력 바람: 마지막 수집 {wt:%H:%M}" if wt else "⚠ 풍력 바람: 자료를 못 읽음")
+        if wt:
+            lines[-1] += (f" · 오늘 API {w['calls_today']}회" if w.get("calls_today") else "") + (f" · 지연 {', '.join(w['stale'])}" if w.get("stale") else "")
     except Exception:
         pass
     bad = any(x.startswith("⚠") for x in lines)
@@ -129,9 +145,14 @@ def main():
     lim = limit(now); stale = lim is not None and age > lim
     print(f"{now:%m-%d %H:%M} KST · {why} · 기준 {lim}분 · 멈춤 {stale}")
     if stale and not st.get("alert"):
-        send(f"⚠ 태양광 예측이 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {why}\n" + "\n".join(cause(now)[0]) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k == "hb"}}
+        send(f"⚠ 태양광 예측이 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {why}\n" + "\n".join(cause(now)[0]) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k in ("hb", "walert", "wsince")}}
     elif st.get("alert") and age <= (lim or 110):
-        send(f"✅ 예측 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k == "hb"}}
+        send(f"✅ 예측 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k in ("hb", "walert", "wsince")}}
+    wt, wa = wind_age(now); wwhy = f"풍력 바람 마지막 수집 {wt:%m-%d %H:%M} ({wa:.0f}분 전)" if wt else "풍력 바람 자료를 못 읽음"
+    if wa > WIND_LIM and not st.get("walert"):                 # 풍력은 밤낮 없이 20분마다라 시간대 구분 없이 봄
+        send(f"⚠ 풍력 바람 자료 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {wwhy}\n{SITE}wind.html"); st["walert"] = True; st["wsince"] = now.strftime("%Y-%m-%d %H:%M")
+    elif st.get("walert") and wa <= WIND_LIM:
+        send(f"✅ 풍력 바람 자료 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {wwhy} (멈춤 알림 {st.get('wsince', '')})"); st["walert"] = False
     if now.hour * 60 + now.minute >= HB[0] * 60 + HB[1] and st.get("hb") != now.strftime("%Y-%m-%d"):   # 하루 한 번 '정상' 요약(감시가 살아 있다는 확인도 겸함)
         try:
             send(heartbeat(now, why)); st["hb"] = now.strftime("%Y-%m-%d")
