@@ -36,6 +36,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH_KEY: ${{ secrets.WATCH_KEY }}           # 없으면 빈 값(서버 watch.json 이 공개일 때, 2026-11-02)
           TEST: ${{ (inputs.test || github.event_name == 'push') && '1' || '0' }}
         run: python check.py
       - name: save state

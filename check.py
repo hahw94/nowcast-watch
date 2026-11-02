@@ -18,7 +18,8 @@ import urllib.request
 # ==============================================================
 # 설정 블록 (여기만 고친다)
 # ==============================================================
-SITE = "https://hahw94.github.io/solar-nowcast-live/"
+SITE = os.environ.get("WATCH_SITE", "https://161-33-191-137.sslip.io/live/")   # 2026-11-02: 사이트가 로그인 뒤로(11-01) → 감시용 상태 주소 SITE + watch.json 만 읽음(로그인 없이)
+WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind"}   # 예전 파일 이름 → watch.json 안 칸
 DAY = ((7, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
 SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
@@ -39,8 +40,17 @@ def send(text):
     print("보냄:", text)
 
 
+_W = {}
+
+
 def rd(u, now):
-    return json.loads(urllib.request.urlopen(f"{SITE}{u}?t={int(now.timestamp())}", timeout=30).read())
+    """watch.json 을 한 번만 받아 예전 파일 이름(data/index.json 등)으로 나눠 줌. 저장소 Secret WATCH_KEY 가 있으면 머리글로 보냄"""
+    if "w" not in _W:
+        h = {"User-Agent": "nowcast-watch"}; k = os.environ.get("WATCH_KEY", "")
+        if k:
+            h["x-watch-key"] = k
+        _W["w"] = json.loads(urllib.request.urlopen(urllib.request.Request(f"{SITE}watch.json?t={int(now.timestamp())}", headers=h), timeout=30).read())
+    return _W["w"][WATCH[u]]
 
 
 def limit(now):
