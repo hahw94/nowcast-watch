@@ -3,8 +3,8 @@
 공개 사이트(solar-nowcast-live) 감시 → 텔레그램 알림 (2026-10-31 연구자 요청: 서버가 멈추면 폰으로, 원인까지).
 GitHub Actions 가 10분마다 돌린다(서버 · 이 PC 가 꺼져도 돎).
 - 멈춤 판단: 마지막으로 나온 예측 결과의 발표 시각(낮 초단기 index.json latest, 밤 단기 night.json 최신)이
-  낮(07:40 – 17:10) 60분, 밤(17:40 – 05:40) 110분 넘게 지나면 한 번 알리고, 새 결과가 나오면 '복구'를 한 번 알린다.
-  (평소 낮은 30분마다 · 밤은 매시 결과가 나오므로 한 번 빠지는 정도는 알리지 않음. 05:40 – 07:40 · 17:10 – 17:40 은 원래 발표 사이)
+  낮(05:40 – 17:10) 60분, 밤(17:40 – 05:40) 110분 넘게 지나면 한 번 알리고, 새 결과가 나오면 '복구'를 한 번 알린다.
+  (평소 낮은 30분마다 · 밤은 매시 결과가 나오므로 한 번 빠지는 정도는 알리지 않음. 17:10 – 17:40 은 원래 발표 사이, 11-03부터 새벽 N1 05:00 ~)
 - 원인: 서버가 올리는 data/status.json(마지막 성공 · 최근 실패 · 디스크 · 받기 양). 이 파일까지 오래됐으면 '서버 응답 없음'으로 본다.
 - 하루 한 번(07:30 뒤 첫 실행) '정상' 요약: 지난밤 단기 · 어제 초단기 발표 수, 마지막 결과, 서버 상태.
 비밀 값(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)은 저장소 Secrets 에서 환경 변수로만 받고 출력하지 않는다. 상태는 state.json(이 저장소).
@@ -20,8 +20,9 @@ import urllib.request
 # ==============================================================
 SITE = os.environ.get("WATCH_SITE", "https://161-33-191-137.sslip.io/live/")   # 2026-11-02: 사이트가 로그인 뒤로(11-01) → 감시용 상태 주소 SITE + watch.json 만 읽음(로그인 없이)
 WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind"}   # 예전 파일 이름 → watch.json 안 칸
-DAY = ((7, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
+DAY = ((5, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
+DAWN_START, DAWN_FROM = 5, "2026-11-03"         # 새벽 N1 첫 시 · 시작 날짜(2026-11-03 연구자: 05시부터)
 SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
 WIND_LIM = 60                                   # 풍력 바람 자료(data/wind.json, 서버 20분마다)가 이 분보다 오래되면 멈춤 알림(2026-10-31 연구자)
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
@@ -109,7 +110,7 @@ def wind_age(now):
 
 
 def heartbeat(now, why):
-    """아침 요약: 지난밤 단기(전날 17 ~ 그날 05시, 13개) · 어제 낮 초단기(07:00 ~ 16:30, 20개) 발표 수와 빠진 시각, 마지막 결과, 서버 상태"""
+    """아침 요약: 지난밤 단기(전날 17 ~ 그날 05시, 13개) · 어제 낮 초단기(05:00 ~ 16:30, 24개 — 11-02까지는 07:00 ~, 20개) 발표 수와 빠진 시각, 마지막 결과, 서버 상태"""
     today, yday = now.strftime("%Y-%m-%d"), (now - dt.timedelta(days=1)).strftime("%Y-%m-%d"); lines = []
     try:
         nj = rd("data/night.json", now); got = {r["run"][9:11] for r in nj.get("by_date", {}).get(today, [])}
@@ -119,7 +120,7 @@ def heartbeat(now, why):
         lines.append(f"⚠ 밤 단기 확인 못 함({type(e).__name__})")
     try:
         ix = rd("data/index.json", now); got = {r[9:13] for r in ix.get("runs", {}).get(yday, [])}
-        want = [f"{h:02d}{m:02d}" for h in range(7, 17) for m in (0, 30)]; miss = [w for w in want if w not in got]
+        want = [f"{h:02d}{m:02d}" for h in range(DAWN_START if yday >= DAWN_FROM else 7, 17) for m in (0, 30)]; miss = [w for w in want if w not in got]
         lines.append(f"{'⚠' if miss else '·'} 어제 초단기 {len(want) - len(miss)}/{len(want)}" + (f" ({', '.join(m[:2] + ':' + m[2:] for m in miss[:6])}{' …' if len(miss) > 6 else ''} 빠짐)" if miss else ""))
     except Exception as e:
         lines.append(f"⚠ 초단기 확인 못 함({type(e).__name__})")
