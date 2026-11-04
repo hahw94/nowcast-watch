@@ -19,7 +19,10 @@ import urllib.request
 # 설정 블록 (여기만 고친다)
 # ==============================================================
 SITE = os.environ.get("WATCH_SITE", "https://161-33-191-137.sslip.io/live/")   # 2026-11-02: 사이트가 로그인 뒤로(11-01) → 감시용 상태 주소 SITE + watch.json 만 읽음(로그인 없이)
-WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind"}   # 예전 파일 이름 → watch.json 안 칸
+WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind", "data/sat_notice.json": "notice"}   # 예전 파일 이름 → watch.json 안 칸
+NOTICE_LIM, NOTICE_FAIL = 150, 6                # 위성센터 공지 확인(서버 30분마다): 이 분 넘게 멈췄거나 이 횟수 연속 실패면 알림(약 3시간, 2026-11-04 연구자)
+REMIND_EVE = 17                                 # 점검 전날 이 시 뒤 첫 실행에 한 번 더 알림. 당일은 HB 시각 뒤 첫 실행
+KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem")   # 멈춤 · 복구 때도 지키는 상태 칸
 DAY = ((5, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
 DAWN_START, DAWN_FROM = 5, "2026-11-03"         # 새벽 N1 첫 시 · 시작 날짜(2026-11-03 연구자: 05시부터)
@@ -109,6 +112,40 @@ def wind_age(now):
         return None, 1e9
 
 
+def notice_text(it, head):
+    """위성 공지 한 건 → 알림 글"""
+    W = "일월화수목금토"; w = "일시 미정(공지 확인)"
+    if it.get("start"):
+        s, e = [dt.datetime.strptime(it[k], "%Y-%m-%d %H:%M") for k in ("start", "end")]
+        w = f"{s.month}월 {s.day}일({W[(s.weekday() + 1) % 7]}) {s:%H:%M}~" + (f"{e:%H:%M}" if s.date() == e.date() else f"{e.month}월 {e.day}일 {e:%H:%M}")
+    return f"{head}\n· {w}\n· {it.get('title', '')}\n{it.get('url', '')}"
+
+
+def notice(now, st):
+    """위성센터 공지: 새 공지 · 전날 · 당일 알림, 공지 확인이 멈추면 알림(2026-11-04 연구자)"""
+    try:
+        n = rd("data/sat_notice.json", now)
+        ck = dt.datetime.strptime(n["checked"], "%Y-%m-%d %H:%M").replace(tzinfo=KST)
+    except Exception as e:
+        print("공지 상태를 못 읽음:", type(e).__name__); return
+    age = (now - ck).total_seconds() / 60; bad = age > NOTICE_LIM or (n.get("fail") or 0) >= NOTICE_FAIL
+    if bad and not st.get("nalert"):
+        send(f"⚠ 위성 공지 확인 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· 마지막 확인 {ck:%m-%d %H:%M} ({age:.0f}분 전) · 연속 실패 {n.get('fail') or 0}번\n· 점검 공지를 놓칠 수 있습니다\nhttps://nmsc.kma.go.kr/homepage/html/base/bbs/listBbs.do?bbsCd=00237"); st["nalert"] = True; st["nsince"] = now.strftime("%Y-%m-%d %H:%M")
+    elif st.get("nalert") and not bad:
+        send(f"✅ 위성 공지 확인 복구 · {now:%m-%d %H:%M} KST\n· 멈춤 알림 {st.get('nsince', '')}"); st["nalert"] = False
+    seen, rem = st.get("nseen") or [], st.get("nrem") or []
+    for it in n.get("items") or []:
+        u = it.get("id")
+        if u not in seen:
+            send(notice_text(it, "🛰 위성 점검 공지" if it.get("start") else "🛰 위성 공지 확인 필요")); seen.append(u)
+        if it.get("start"):
+            t = dt.datetime.strptime(it["start"], "%Y-%m-%d %H:%M").replace(tzinfo=KST); d = (t.date() - now.date()).days
+            k = f"{u}-{d}"; hm = now.hour * 60 + now.minute
+            if k not in rem and ((d == 1 and now.hour >= REMIND_EVE) or (d == 0 and now < t and hm >= HB[0] * 60 + HB[1])):
+                send(notice_text(it, "🛰 내일 위성 점검" if d == 1 else "🛰 오늘 위성 점검")); rem.append(k)
+    st["nseen"], st["nrem"] = seen[-30:], rem[-30:]
+
+
 def heartbeat(now, why):
     """아침 요약: 지난밤 단기(전날 17 ~ 그날 05시, 13개) · 어제 낮 초단기(05:00 ~ 16:30, 24개 — 11-02까지는 07:00 ~, 20개) 발표 수와 빠진 시각, 마지막 결과, 서버 상태"""
     today, yday = now.strftime("%Y-%m-%d"), (now - dt.timedelta(days=1)).strftime("%Y-%m-%d"); lines = []
@@ -156,14 +193,18 @@ def main():
     lim = limit(now); stale = lim is not None and age > lim
     print(f"{now:%m-%d %H:%M} KST · {why} · 기준 {lim}분 · 멈춤 {stale}")
     if stale and not st.get("alert"):
-        send(f"⚠ 태양광 예측이 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {why}\n" + "\n".join(cause(now)[0]) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k in ("hb", "walert", "wsince")}}
+        send(f"⚠ 태양광 예측이 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {why}\n" + "\n".join(cause(now)[0]) + f"\n{SITE}"); st = {"alert": True, "since": now.strftime("%Y-%m-%d %H:%M"), **{k: v for k, v in st.items() if k in KEEP}}
     elif st.get("alert") and age <= (lim or 110):
-        send(f"✅ 예측 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k in ("hb", "walert", "wsince")}}
+        send(f"✅ 예측 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {why} (멈춤 알림 {st.get('since', '')})"); st = {"alert": False, **{k: v for k, v in st.items() if k in KEEP}}
     wt, wa = wind_age(now); wwhy = f"풍력 바람 마지막 수집 {wt:%m-%d %H:%M} ({wa:.0f}분 전)" if wt else "풍력 바람 자료를 못 읽음"
     if wa > WIND_LIM and not st.get("walert"):                 # 풍력은 밤낮 없이 20분마다라 시간대 구분 없이 봄
         send(f"⚠ 풍력 바람 자료 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {wwhy}\n{SITE}wind.html"); st["walert"] = True; st["wsince"] = now.strftime("%Y-%m-%d %H:%M")
     elif st.get("walert") and wa <= WIND_LIM:
         send(f"✅ 풍력 바람 자료 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {wwhy} (멈춤 알림 {st.get('wsince', '')})"); st["walert"] = False
+    try:
+        notice(now, st)
+    except Exception as e:
+        print("공지 알림 실패:", e)
     if now.hour * 60 + now.minute >= HB[0] * 60 + HB[1] and st.get("hb") != now.strftime("%Y-%m-%d"):   # 하루 한 번 '정상' 요약(감시가 살아 있다는 확인도 겸함)
         try:
             send(heartbeat(now, why)); st["hb"] = now.strftime("%Y-%m-%d")
