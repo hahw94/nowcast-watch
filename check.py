@@ -22,12 +22,17 @@ SITE = os.environ.get("WATCH_SITE", "https://161-33-191-137.sslip.io/live/")   #
 WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind", "data/sat_notice.json": "notice"}   # 예전 파일 이름 → watch.json 안 칸
 NOTICE_LIM, NOTICE_FAIL = 150, 6                # 위성센터 공지 확인(서버 30분마다): 이 분 넘게 멈췄거나 이 횟수 연속 실패면 알림(약 3시간, 2026-11-04 연구자)
 REMIND_EVE = 17                                 # 점검 전날 이 시 뒤 첫 실행에 한 번 더 알림. 당일은 HB 시각 뒤 첫 실행
-KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem")   # 멈춤 · 복구 때도 지키는 상태 칸
+KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem", "jbad", "jpend", "rota")   # 멈춤 · 복구 때도 지키는 상태 칸
 DAY = ((5, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
 DAWN_START, DAWN_FROM = 5, "2026-11-03"         # 새벽 N1 첫 시 · 시작 날짜(2026-11-03 연구자: 05시부터)
 SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
 WIND_LIM = 60                                   # 풍력 바람 자료(data/wind.json, 서버 20분마다)가 이 분보다 오래되면 멈춤 알림(2026-10-31 연구자)
+JOBS = (("demand", "수요 실적", 60), ("target", "수요 기온 · 예보", 180), ("windcf", "전국 풍력", 60), ("hazard", "위험기상", 150), ("kim", "KIM 예보", 180), ("ens", "밤 앙상블", 150),
+        ("ecm", "ECMWF 예보", 840), ("ecmd", "ECMWF 일일 표", 1620), ("kpx", "KPX 실적", 3000), ("sat", "유사일 위성 사진", 1620), ("days", "유사일 후보 날", 1620))   # (칸, 이름, 멈춤 판단 분) 평소 주기의 2 ~ 3배(2026-11-06 연구자)
+NIGHT_ONLY = ("ens",)                           # 밤에만 도는 작업: 낮에는 안 봄
+PORTS = (("analog", "유사일 서버"), ("notes", "근무노트"), ("energy", "에너지기상"))   # 내부 서비스. 재시작 때 오알림이 없게 두 번 연속일 때만 알림
+ROTA_WARN = 30                                  # 근무표가 끝나기 이 날 전에 한 번 알림
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 # ==============================================================
@@ -100,7 +105,10 @@ def cause(now):
     L.append(f"· 남은 디스크 용량 {s.get('disk_free_gb')} GB · 오늘 기상청 API 사용량 {s.get('kma_today_gb')} GB")
     wt, wa = wind_age(now)
     L.append(f"· 풍력 바람 {'멈춤 추정' if wa > WIND_LIM else '정상'} (마지막 수집 {wt:%m-%d %H:%M})" if wt else "· 풍력 바람 자료를 못 읽음")
-    return L, (silent or bool(s.get("errors")) or wa > WIND_LIM)
+    jl = jobs_line(now)
+    if jl:
+        L.append(jl)
+    return L, (silent or bool(s.get("errors")) or wa > WIND_LIM or bool(jl and jl.startswith("⚠")))
 
 
 def wind_age(now):
@@ -110,6 +118,60 @@ def wind_age(now):
         return t, (now - t).total_seconds() / 60
     except Exception:
         return None, 1e9
+
+
+def hm(m):
+    """분 → 읽기 쉬운 글"""
+    return f"{m}분" if m < 120 else f"{m / 60:.0f}시간"
+
+
+def jobs_bad(now):
+    """멈춘 자동 작업 · 내부 서비스 {칸: 글}. 서버를 못 읽으면 None(그때는 예측 멈춤 알림이 감)"""
+    try:
+        rd("data/status.json", now); W = _W["w"]
+    except Exception:
+        return None
+    if "jobs" not in W:
+        return None
+    bad = {}
+    for k, nm, lim in JOBS:
+        a = W["jobs"].get(k)
+        if k in NIGHT_ONLY and 6 <= now.hour < 18:
+            continue
+        if a is None or a > lim:
+            bad[k] = f"{nm}: " + ("결과 없음" if a is None else f"{hm(a)} 전이 마지막")
+    for k, nm in PORTS:
+        if not W.get("ports", {}).get(k):
+            bad["p:" + k] = f"{nm}: 응답 없음"
+    return bad
+
+
+def jobs_line(now):
+    """요약 한 줄(못 읽으면 None)"""
+    b = jobs_bad(now)
+    if b is None:
+        return None
+    return f"· 자동 작업 · 서비스 {len(JOBS) + len(PORTS)}개 정상" if not b else "⚠ 자동 작업 멈춤: " + ", ".join(b.values())
+
+
+def jobs(now, st):
+    """유사일 · 수요 · KIM · ECMWF · 위험기상 등 멈춤 · 복구 알림, 근무표 끝 알림(2026-11-06 연구자)"""
+    bad = jobs_bad(now)
+    if bad is None:
+        return
+    was, pend = st.get("jbad") or {}, st.get("jpend") or []
+    new = {k: v for k, v in bad.items() if k not in was and (not k.startswith("p:") or k in pend)}
+    back = {k: v for k, v in was.items() if k not in bad}
+    if new:
+        send(f"⚠ 자동 작업 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n" + "\n".join(f"· {v}" for v in new.values()))
+    if back:
+        send(f"✅ 자동 작업 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n" + "\n".join(f"· {v.split(':')[0]}" for v in back.values()))
+    st["jbad"] = {**{k: v for k, v in was.items() if k in bad}, **new}; st["jpend"] = list(bad)
+    end = _W["w"].get("rota_end")
+    if end and st.get("rota") != end:
+        left = (dt.date.fromisoformat(end) - now.date()).days
+        if left <= ROTA_WARN:
+            send(f"📅 근무표가 {end} 에 끝납니다 · {left}일 남음\n· 다음 근무표를 운영에 보내 주세요"); st["rota"] = end
 
 
 def notice_text(it, head):
@@ -171,6 +233,9 @@ def heartbeat(now, why):
         if any(v for v in j.values()):
             lines.append("· 계산 시간(중앙): " + " · ".join(f"{nm} {j[k]}초" for k, nm in (("b5", "B5"), ("w", "W"), ("l1", "밤 단기")) if j.get(k)))
         lines.append(f"{'⚠' if s.get('errors') else '·'} 최근 실패 {len(s.get('errors') or [])}건")
+        jl = jobs_line(now)
+        if jl:
+            lines.append(jl)
         w = s.get("wind") or {}; wt, wa = wind_age(now)
         lines.append(f"{'⚠' if wa > WIND_LIM or w.get('stale') else '·'} 풍력 바람: 마지막 수집 {wt:%H:%M}" if wt else "⚠ 풍력 바람: 자료를 못 읽음")
         if wt:
@@ -201,6 +266,10 @@ def main():
         send(f"⚠ 풍력 바람 자료 멈춤 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n· {wwhy}\n{SITE}wind.html"); st["walert"] = True; st["wsince"] = now.strftime("%Y-%m-%d %H:%M")
     elif st.get("walert") and wa <= WIND_LIM:
         send(f"✅ 풍력 바람 자료 복구 · {now:%m-%d %H:%M} KST\n모니터링 결과 : 문제 없음\n· {wwhy} (멈춤 알림 {st.get('wsince', '')})"); st["walert"] = False
+    try:
+        jobs(now, st)
+    except Exception as e:
+        print("자동 작업 확인 실패:", e)
     try:
         notice(now, st)
     except Exception as e:
