@@ -25,13 +25,19 @@ REMIND_EVE = 17                                 # 점검 전날 이 시 뒤 첫 
 KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem", "jbad", "jpend", "rota")   # 멈춤 · 복구 때도 지키는 상태 칸
 DAY = ((5, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
+NIGHT_W = (18, 40)                              # 겨울(NIGHT_SKIP17 기간) 밤 시작: 17:00 단기가 없어 18:00 단기가 나온 뒤부터(2026-11-20 연구자)
 DAWN_START, DAWN_FROM = 5, "2026-11-03"         # 새벽 N1 첫 시 · 시작 날짜(2026-11-03 연구자: 05시부터)
 SERVER_SILENT_MIN = 40                          # status.json 이 이것과 멈춤 판단 분 중 큰 값보다 오래됐으면 서버 응답 없음으로 봄(판단하지 않는 시간엔 보지 않음)
 WIND_LIM = 60                                   # 풍력 바람 자료(data/wind.json, 서버 20분마다)가 이 분보다 오래되면 멈춤 알림(2026-10-31 연구자)
 JOBS = (("demand", "수요 실적", 60), ("target", "수요 기온 · 예보", 180), ("windcf", "전국 풍력", 60), ("hazard", "위험기상", 150), ("kim", "KIM 예보", 180), ("ens", "밤 앙상블", 150),
         ("ecm", "ECMWF 예보", 840), ("ecmd", "ECMWF 일일 표", 1620), ("kpx", "KPX 실적", 3000), ("sat", "유사일 위성 사진", 1620), ("days", "유사일 후보 날", 1620), ("score", "예측 성적표", 1620), ("snap", "수요 예측 저장", 840), ("bglive", "실제 배경 장면", 1620))   # (칸, 이름, 멈춤 판단 분) 평소 주기의 2 ~ 3배(2026-11-06 연구자)
 NIGHT_ONLY = ("ens",)                           # 밤에만 도는 작업: 낮에는 안 봄
-NIGHT_SKIP17 = ("1118", "0221")                 # 이 기간은 17:00 밤 단기가 없어 18:00 단기 뒤(19시)부터 밤 앙상블을 봄(2026-11-20 연구자)
+NIGHT_SKIP17 = ("1118", "0221")                 # 이 기간은 17:00 밤 단기가 없음: 밤 판단 18:40 부터 · 밤 앙상블 19시부터 · 아침 요약 12개(2026-11-20 연구자)
+def skip17(d):
+    """겨울(17:00 밤 단기 없는 날)인지"""
+    md = d.strftime("%m%d"); return md >= NIGHT_SKIP17[0] or md <= NIGHT_SKIP17[1]
+
+
 PORTS = (("analog", "유사일 서버"), ("notes", "근무노트"), ("energy", "에너지기상"))   # 내부 서비스. 재시작 때 오알림이 없게 두 번 연속일 때만 알림
 ROTA_WARN = 30                                  # 근무표가 끝나기 이 날 전에 한 번 알림
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
@@ -70,6 +76,8 @@ def limit(now):
     if a[0] * 60 + a[1] <= m <= b[0] * 60 + b[1]:
         return lim
     (a, b, lim) = NIGHT
+    if skip17(now):
+        a = NIGHT_W
     if m >= a[0] * 60 + a[1] or m <= b[0] * 60 + b[1]:
         return lim
     return None
@@ -137,7 +145,7 @@ def jobs_bad(now):
     bad = {}
     for k, nm, lim in JOBS:
         a = W["jobs"].get(k)
-        md = now.strftime("%m%d"); h0 = 19 if (md >= NIGHT_SKIP17[0] or md <= NIGHT_SKIP17[1]) else 18
+        h0 = 19 if skip17(now) else 18
         if k in NIGHT_ONLY and 6 <= now.hour < h0:
             continue
         if a is None or a > lim:
@@ -215,7 +223,7 @@ def heartbeat(now, why):
     today, yday = now.strftime("%Y-%m-%d"), (now - dt.timedelta(days=1)).strftime("%Y-%m-%d"); lines = []
     try:
         nj = rd("data/night.json", now); got = {r["run"][9:11] for r in nj.get("by_date", {}).get(today, [])}
-        want = [f"{h:02d}" for h in list(range(17, 24)) + list(range(0, 6))]; miss = [h for h in want if h not in got]
+        want = [f"{h:02d}" for h in list(range(18 if skip17(now - dt.timedelta(days=1)) else 17, 24)) + list(range(0, 6))]; miss = [h for h in want if h not in got]
         lines.append(f"{'⚠' if miss else '·'} 밤 단기 {len(want) - len(miss)}/{len(want)}" + (f" ({', '.join(m + '시' for m in miss)} 빠짐)" if miss else ""))
     except Exception as e:
         lines.append(f"⚠ 밤 단기 확인 못 함({type(e).__name__})")
