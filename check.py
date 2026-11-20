@@ -31,6 +31,7 @@ WIND_LIM = 60                                   # 풍력 바람 자료(data/wind
 JOBS = (("demand", "수요 실적", 60), ("target", "수요 기온 · 예보", 180), ("windcf", "전국 풍력", 60), ("hazard", "위험기상", 150), ("kim", "KIM 예보", 180), ("ens", "밤 앙상블", 150),
         ("ecm", "ECMWF 예보", 840), ("ecmd", "ECMWF 일일 표", 1620), ("kpx", "KPX 실적", 3000), ("sat", "유사일 위성 사진", 1620), ("days", "유사일 후보 날", 1620), ("score", "예측 성적표", 1620), ("snap", "수요 예측 저장", 840), ("bglive", "실제 배경 장면", 1620))   # (칸, 이름, 멈춤 판단 분) 평소 주기의 2 ~ 3배(2026-11-06 연구자)
 NIGHT_ONLY = ("ens",)                           # 밤에만 도는 작업: 낮에는 안 봄
+NIGHT_SKIP17 = ("1118", "0221")                 # 이 기간은 17:00 밤 단기가 없어 18:00 단기 뒤(19시)부터 밤 앙상블을 봄(2026-11-20 연구자)
 PORTS = (("analog", "유사일 서버"), ("notes", "근무노트"), ("energy", "에너지기상"))   # 내부 서비스. 재시작 때 오알림이 없게 두 번 연속일 때만 알림
 ROTA_WARN = 30                                  # 근무표가 끝나기 이 날 전에 한 번 알림
 HB = (7, 30)                                    # 하루 한 번 '정상' 요약을 보내는 시각(이 시각 뒤 첫 실행)
@@ -136,7 +137,8 @@ def jobs_bad(now):
     bad = {}
     for k, nm, lim in JOBS:
         a = W["jobs"].get(k)
-        if k in NIGHT_ONLY and 6 <= now.hour < 18:
+        md = now.strftime("%m%d"); h0 = 19 if (md >= NIGHT_SKIP17[0] or md <= NIGHT_SKIP17[1]) else 18
+        if k in NIGHT_ONLY and 6 <= now.hour < h0:
             continue
         if a is None or a > lim:
             bad[k] = f"{nm}: " + ("결과 없음" if a is None else f"{hm(a)} 전이 마지막")
