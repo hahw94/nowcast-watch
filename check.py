@@ -22,7 +22,7 @@ SITE = os.environ.get("WATCH_SITE", "https://161-33-191-137.sslip.io/live/")   #
 WATCH = {"data/index.json": "index", "data/night.json": "night", "data/status.json": "status", "data/wind.json": "wind", "data/sat_notice.json": "notice"}   # 예전 파일 이름 → watch.json 안 칸
 NOTICE_LIM, NOTICE_FAIL = 150, 6                # 위성센터 공지 확인(서버 30분마다): 이 분 넘게 멈췄거나 이 횟수 연속 실패면 알림(약 3시간, 2026-11-04 연구자)
 REMIND_EVE = 17                                 # 점검 전날 이 시 뒤 첫 실행에 한 번 더 알림. 당일은 HB 시각 뒤 첫 실행
-KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem", "jbad", "jpend", "rota")   # 멈춤 · 복구 때도 지키는 상태 칸
+KEEP = ("hb", "walert", "wsince", "nalert", "nsince", "nseen", "nrem", "jbad", "jpend", "rota", "pvday")   # 멈춤 · 복구 때도 지키는 상태 칸
 DAY = ((5, 40), (17, 10), 60)                   # (시작, 끝, 멈춤 판단 분: 마지막 결과의 발표 시각부터) 한국 시각
 NIGHT = ((17, 40), (5, 40), 110)                # 자정을 넘김
 NIGHT_W = (18, 40)                              # 겨울(NIGHT_SKIP17 기간) 밤 시작: 17:00 단기가 없어 18:00 단기가 나온 뒤부터(2026-11-20 연구자)
@@ -184,6 +184,23 @@ def jobs(now, st):
             send(f"📅 근무표가 {end} 에 끝납니다 · {left}일 남음\n· 다음 근무표를 운영에 보내 주세요"); st["rota"] = end
 
 
+def pvwatch(now, st):
+    """발전량 오차 감시(서버 매일 10:40) 결과에 문제가 있으면 그날 한 번 알림(2026-11-28 연구자 「문제가 있으면 바로 오게」): 오차 단계가 정상이 아님 · 이상치 발표 · 입력 자료 오류 발표"""
+    p = (_W.get("w") or {}).get("pvw") or {}; d = p.get("day")
+    if not d or st.get("pvday") == d:
+        return
+    bad = []
+    if p.get("level") and p["level"] != "정상":
+        bad.append(f"발전량 오차 {p['level']}" + (": " + " / ".join(p.get("why") or []) if p.get("why") else ""))
+    if p.get("outlier"):
+        bad.append("이상치 발표(앞 발표 대비 ±10 %p 넘게 바뀜): " + ", ".join(p["outlier"]))
+    if p.get("input_err"):
+        bad.append("입력 자료 오류 발표(위성 자료를 못 받아 채워 계산): " + ", ".join(p["input_err"]))
+    if bad:
+        send(f"⚠ 발전량 오차 감시 · {d} · {now:%m-%d %H:%M} KST\n모니터링 결과 : 확인 필요\n" + "\n".join(f"· {x}" for x in bad))
+    st["pvday"] = d
+
+
 def notice_text(it, head):
     """위성 공지 한 건 → 알림 글"""
     W = "일월화수목금토"; w = "일시 미정(공지 확인)"
@@ -280,6 +297,10 @@ def main():
         jobs(now, st)
     except Exception as e:
         print("자동 작업 확인 실패:", e)
+    try:
+        pvwatch(now, st)
+    except Exception as e:
+        print("오차 감시 확인 실패:", e)
     try:
         notice(now, st)
     except Exception as e:
